@@ -1,3 +1,4 @@
+from .. import PipelineException
 from scipy.interpolate import interp1d, interp2d
 import numpy as np
 
@@ -9,43 +10,46 @@ def correct_motion(img, xymotion):
     :param xymotion: x, y motion offsets
     :return: motion corrected image [x, y]
     """
-    assert isinstance(img, np.ndarray) and len(xymotion) == 2, 'Cannot correct stacks. Only 2D images please.'
+    if not isinstance(img, np.ndarray) and len(xymotion) != 2:
+        raise PipelineException('Cannot correct image. Only 2D images please.')
     sz = img.shape
-    y1, x1 = np.ogrid[0: sz[0], 0: sz[1]]
-    y2, x2 = [np.arange(sz[0]) + xymotion[1], np.arange(sz[1]) + xymotion[0]]
+    if not hasattr(correct_motion,'x1'):
+        y1, x1 = np.ogrid[0: sz[0], 0: sz[1]]
+        correct_motion.x1 = x1
+        correct_motion.y1 = y1
+    else:
+        x1, y1 = correct_motion.x1, correct_motion.y1
+    y2, x2 = np.arange(sz[0]) + xymotion[1], np.arange(sz[1]) + xymotion[0]
 
     interp = interp2d(x1, y1, img, kind='cubic')
-    img = interp(x2, y2)
+    return interp(x2, y2)
 
-    return img
 
 
 def correct_raster(img, raster_phase, fill_fraction):
     """
     raster correction for resonant scanners.
-    :param img: 5D image [x, y, nchannel, nslice, nframe].
+    :param img: 2D image [x, y].
     :param raster_phase: phase difference beetween odd and even lines.
     :param fill_fraction: ratio between active acquisition and total length of the scan line. see scanimage.
-    :return: raster-corrected image [x, y, nchannel, nslice, nframe].
+    :return: raster-corrected image [x, y].
     """
-    img = np.array(img)
-    assert img.ndim <= 5, 'Image size greater than 5D.'
-    ix = np.arange(-img.shape[1]/2 + 0.5, img.shape[1]/2 + 0.5) / (img.shape[1]/2)
 
+    if not len(img.shape) == 2:
+        raise PipelineException('Image must have two dimensions only')
+
+    ix = np.arange(-img.shape[1] / 2 + 0.5, img.shape[1] / 2 + 0.5) / (img.shape[1] / 2)
     tx = np.arcsin(ix * fill_fraction)
-    for ichannel in range(img.shape[2]):
-        for islice in range(img.shape[3]):
-            for iframe in range(img.shape[4]):
-                im = img[:, :, ichannel, islice, iframe].copy()
-                extrapval = np.mean(im)
-                img[::2, :, ichannel, islice, iframe] = interp1d(ix, im[::2, :], kind='linear', bounds_error=False,
-                                                                  fill_value=extrapval)(np.sin(tx +
-                                                                                        raster_phase)/fill_fraction)
 
-                img[1::2, :, ichannel, islice, iframe] = interp1d(ix, im[1::2, :], kind='linear', bounds_error=-False,
-                                                                  fill_value=extrapval)(np.sin(tx -
-                                                                                        raster_phase)/fill_fraction)
-    return img
+    im = np.array(img).T
+    img = img.T
+    extrapval = np.mean(img)
+    im[::2, :] = interp1d(ix, img[::2, :], kind='linear', bounds_error=False,
+                                  fill_value=extrapval)(np.sin(tx + raster_phase) / fill_fraction)
+
+    im[1::2, :] = interp1d(ix, img[1::2, :], kind='linear', bounds_error=-False,
+                                   fill_value=extrapval)(np.sin(tx - raster_phase) / fill_fraction)
+    return img.T
 
 
 def plot_raster(filename, key):
@@ -59,7 +63,7 @@ def plot_raster(filename, key):
     from pipeline import preprocess, experiment
     from tiffreader import TIFFReader
     reader = TIFFReader(filename)
-    img=reader[:, :, 0, 0, 100]
+    img = reader[:, :, 0, 0, 100]
     raster_phase = (preprocess.Prepare.Galvo() & key).fetch1['raster_phase']
     newim = correct_raster(img, raster_phase, reader.fill_fraction)
     nnewim = correct_raster(newim, -raster_phase, reader.fill_fraction)
@@ -67,12 +71,12 @@ def plot_raster(filename, key):
 
     plt.close()
     with sns.axes_style('white'):
-        fig=plt.figure(figsize=(15,8))
-        gs=plt.GridSpec(1,3)
-        ax1=fig.add_subplot(gs[0,0])
-        ax1.imshow(img[:,:,0,0,0], cmap=plt.cm.gray)
-        ax2=fig.add_subplot(gs[0,1])
-        ax2.imshow(newim[:,:,0,0,0],cmap=plt.cm.gray)
-        ax3=fig.add_subplot(gs[0,2])
-        ax3.imshow(nnewim[:,:,0,0,0], cmap=plt.cm.gray)
+        fig = plt.figure(figsize=(15, 8))
+        gs = plt.GridSpec(1, 3)
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax1.imshow(img[:, :, 0, 0, 0], cmap=plt.cm.gray)
+        ax2 = fig.add_subplot(gs[0, 1])
+        ax2.imshow(newim[:, :, 0, 0, 0], cmap=plt.cm.gray)
+        ax3 = fig.add_subplot(gs[0, 2])
+        ax3.imshow(nnewim[:, :, 0, 0, 0], cmap=plt.cm.gray)
     plt.show()

@@ -15,10 +15,10 @@ from . import config
 from distutils.version import StrictVersion
 from .utils import galvo_corrections
 from .experiment import Session
+import tiffreader
+from commons import lab
 # import caiman.source_extraction.cnmf as cnmf
-
 assert StrictVersion(dj.__version__) >= StrictVersion('0.2.8')
-
 schema = dj.schema('pipeline_preprocess', locals())
 schema.spawn_missing_classes()
 
@@ -119,8 +119,8 @@ class Prepare(dj.Imported):
             """
             :return: a function that performs motion correction on image [x, y].
             """
-            xy = self.fetch['motion_xy']
-            return lambda frame, i: galvo_corrections.correct_motion(frame, xy[:, i])
+            xy = np.vstack(self.fetch['motion_xy'])
+            return lambda frame, i: galvo_corrections.correct_motion(frame, xy[:,i])
 
     class GalvoAverageFrame(dj.Part):
         definition = """   # average frame for each slice and channel after corrections
@@ -188,10 +188,10 @@ class ExtractRaw(dj.Imported):
 
     @property
     def key_source(self):
-        return Prepare() * Method() \
-               & ((Prepare.Galvo() * Method.Galvo() - 'segmentation="manual"') | \
-                  Prepare.Galvo() * Method.Galvo() * ManualSegment() | \
-                  Prepare.Aod() * Method.Aod()) \
+        return (Prepare() * Method() \
+               & [(Prepare.Galvo() * Method.Galvo() - 'segmentation="manual"') , \
+                  Prepare.Galvo() * Method.Galvo() * ManualSegment() , \
+                  Prepare.Aod() * Method.Aod()]) \
                  - (Session.TargetStructure() & 'compartment="axon"')
 
     class Trace(dj.Part):
@@ -250,6 +250,48 @@ class ExtractRaw(dj.Imported):
     #     options = cnmf.utilities.CNMFSetParms((d1, d2, nframes), n_processes=1, p=p, gSig=[4, 4], K=max_neurons, ssub=1,
     #                                           tsub=1)
     #
+
+    def simple_video(self, outfile):
+        import cv2
+        assert len(self) == 1, 'Can only produce video for one entry'
+
+
+        template = np.stack([normalize(t)
+                             for t in (Prepare.GalvoAverageFrame() & self).fetch['frame']], axis=2).max(axis=2)
+
+        d1, d2, fps = tuple(map(int, (Prepare.Galvo() & self).fetch1['px_height', 'px_width', 'fps']))
+        mask_px, mask_w, spikes, ids = (self.GalvoROI() * self.SpikeRate() * ComputeTraces.Trace() & self).fetch.order_by('trace_id')[
+            'mask_pixels', 'mask_weights', 'spike_trace', 'trace_id']
+        masks = self.GalvoROI.reshape_masks(mask_px, mask_w, d1, d2)
+        spikes = np.hstack(spikes)
+
+
+
+        # Define the codec and create VideoWriter object
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        out = cv2.VideoWriter('output.avi',fourcc, fps, (d1,d2))
+
+        fac = 255  / masks.max() / spikes.max()
+        for t, fr in enumerate(spikes):
+            frame = np.tensordot(masks, fr, (2,0))
+            denom = frame.max()-frame.min()
+            if denom > 0:
+                frame -= frame.min()
+                frame /= denom
+            frame += template
+            frame -= frame.min()
+            frame /= (frame.max()-frame.min())/255
+            frame = frame.astype(np.uint8)
+            cv2.putText(frame,'%.2fs' % (t/fps), (20,50), cv2.FONT_HERSHEY_SIMPLEX, 2, 255)
+            out.write(frame)
+
+            cv2.imshow('frame',frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        # Release everything if job is finished
+        out.release()
+        cv2.destroyAllWindows()
 
 
     def plot_traces_and_masks(self, traces, slice, mask_channel=1, outfile='traces.pdf'):
@@ -397,7 +439,35 @@ class ExtractRaw(dj.Imported):
                 plt.close(fig)
 
     def _make_tuples(self, key):
-        pass
+        import cv2
+        from caiman.source_extraction.cnmf import cnmf as cnmf
+        fix_motion = (Prepare.GalvoMotion() & key).get_fix_motion()
+        fix_raster = (Prepare.Galvo() & key).get_fix_raster()
+        scan_path = (experiment.Session() & key).fetch1['scan_path']
+        file_base = (experiment.Scan() & key).fetch1['filename']
+        scan_path = lab.Paths().get_local_path(scan_path)
+        # template = '{scan_path}/{file_base}*.tif'.format(scan_path=scan_path, file_base=file_base)
+        template = '{scan_path}/{file_base}_0000[1-9].tif'.format(scan_path=scan_path, file_base=file_base)
+
+
+        tr = tiffreader.TIFFReader(template)
+
+        stack = []
+        T = tr.shape[-1]
+        for t in range(T):
+            print('\r%i/%i' % (t,T), flush=True, end='')
+
+            frame = fix_motion(fix_raster(tr[:,:,:,:,t].squeeze()),t)
+            stack.append(frame)
+        stack = fill_nans(np.stack(stack, axis=2))
+        stack -= stack.min()
+
+        #----------------------------------
+        # TODO: Remove this later
+        from IPython import embed
+        embed()
+        # exit()
+        #----------------------------------
 
 
 @schema
